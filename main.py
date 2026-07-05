@@ -41,8 +41,8 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 # One shared converter instance.
 # `enable_plugins=False` keeps behavior predictable; flip to True if you
 # install third-party markitdown plugins later.
-md_converter = MarkItDown(enable_plugins=False)
 
+md_converter = MarkItDown()
 
 def normalize_youtube_url(url: str) -> str:
     """
