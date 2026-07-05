@@ -25,6 +25,12 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from markitdown import MarkItDown
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import (
+    TranscriptsDisabled,
+    NoTranscriptFound,
+    VideoUnavailable,
+)
 
 app = FastAPI(title="MarkItDown Web App")
 
@@ -70,29 +76,77 @@ async def index():
     return HTMLResponse(html_path.read_text(encoding="utf-8"))
 
 
+def extract_video_id(url: str) -> str | None:
+    patterns = [
+        r"youtu\.be/([A-Za-z0-9_-]{11})",
+        r"youtube\.com/shorts/([A-Za-z0-9_-]{11})",
+        r"youtube\.com/embed/([A-Za-z0-9_-]{11})",
+        r"[?&]v=([A-Za-z0-9_-]{11})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
 @app.post("/convert/youtube")
 async def convert_youtube(url: str = Form(...)):
     if not url or "youtu" not in url.lower():
         raise HTTPException(status_code=400, detail="That doesn't look like a YouTube URL.")
 
     clean_url = normalize_youtube_url(url)
+    video_id = extract_video_id(clean_url)
 
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Couldn't find a video ID in that URL.")
+
+    # --- 1. Get the transcript directly (more reliable than relying on
+    #     MarkItDown's internal YouTube converter, which has had several
+    #     compounding bugs around URL parsing and library version mismatches).
+    transcript_text = None
+    transcript_error = None
+    try:
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        transcript_text = " ".join(part["text"] for part in transcript_list)
+    except TranscriptsDisabled:
+        transcript_error = "Captions are disabled for this video."
+    except NoTranscriptFound:
+        transcript_error = "No transcript/captions found for this video."
+    except VideoUnavailable:
+        transcript_error = "This video is unavailable."
+    except Exception as e:
+        transcript_error = str(e)
+
+    # --- 2. Get title/description/metadata via MarkItDown as a bonus,
+    #     but don't fail the whole request if this part breaks.
+    title = None
     try:
         result = md_converter.convert(clean_url)
-        return JSONResponse({
-            "success": True,
-            "source": clean_url,
-            "markdown": result.text_content,
-        })
-    except Exception as e:
-        traceback.print_exc()
+        # First markdown heading line is usually the title
+        first_line = result.text_content.strip().splitlines()[0] if result.text_content else ""
+        title = first_line.lstrip("#").strip() or None
+    except Exception:
+        pass
+
+    if not transcript_text:
         raise HTTPException(
             status_code=422,
-            detail=(
-                f"Couldn't convert that video ({e}). Some videos have no "
-                "captions/transcript available, which MarkItDown needs."
-            ),
+            detail=f"Couldn't get a transcript for that video. {transcript_error or ''}".strip(),
         )
+
+    markdown_parts = []
+    if title:
+        markdown_parts.append(f"# {title}\n")
+    markdown_parts.append(f"**Source:** {clean_url}\n")
+    markdown_parts.append("## Transcript\n")
+    markdown_parts.append(transcript_text)
+
+    return JSONResponse({
+        "success": True,
+        "source": clean_url,
+        "markdown": "\n".join(markdown_parts),
+    })
 
 
 @app.post("/convert/file")
@@ -127,3 +181,4 @@ async def convert_file(file: UploadFile = File(...)):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+  
